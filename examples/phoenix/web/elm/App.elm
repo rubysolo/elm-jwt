@@ -3,17 +3,18 @@ module App exposing (init, update, view)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
+import Task exposing (Task)
 
 import Http
 import Json.Encode as E exposing (Value)
 
-import Platform.Cmd exposing (Cmd)
-import Task
-
 import Jwt exposing (..)
 import Decoders exposing (..)
 
+-- authUrl = "/auth"
+authUrl = "/sessions"
 -- MODEL
+
 type Field
     = Uname
     | Pword
@@ -35,55 +36,55 @@ type Msg
     = FormInput Field String
     | Submit
     | TryToken
+    | TryWithInvalidToken
     -- Cmd results
-    | LoginSuccess String
-    | LoginFail JwtError
-    | PostSucess String
-    | PostFail JwtError
+    | Auth (Result Http.Error String)
+    | GetResult (Result JwtError String)
+    | InvalidTokenResult (Result JwtError String)
 
 update : Msg -> Model -> (Model, Cmd Msg)
-update msg model =
-    case msg of
+update message model =
+    case message of
         FormInput inputId val ->
             let res = case inputId of
-                Uname -> { model | uname = val }
-                Pword -> { model | pword = val }
-            in (res, Cmd.none)
+                Uname ->
+                    { model | uname = val }
+                Pword ->
+                    { model | pword = val }
+            in res ! []
         Submit ->
-            let credentials =
-                E.object
-                    [ ("username", E.string model.uname)
-                    , ("password", E.string model.pword)
-                    ]
-                |> E.encode 0
-            in
             ( model
-            , Task.perform
-                LoginFail LoginSuccess
-                (authenticate tokenStringDecoder "/sessions" credentials)
+            , submitCredentials model
             )
         TryToken ->
-            ( { model | msg = "Attempting to load message..." }
-            , case model.token of
-                Nothing ->
-                    Cmd.none
+            case model.token of
                 Just token ->
-                    Jwt.get token dataDecoder "/api/data"
-                    `Task.onError` (promote401 token)
-                    |> Task.perform PostFail PostSucess
+                    { model | msg = "Contacting server..." } ! [ tryToken token ]
+                Nothing ->
+                    { model | msg = "No token" } ! []
+        TryWithInvalidToken ->
+            ( { model | msg = "Contacting server..." }
+            , tryWithInvalidToken
             )
-        LoginSuccess token ->
-            ( { model | token = Just token, msg = "" }, Cmd.none )
-        LoginFail err ->
-            ( { model | msg = toString err }, Cmd.none )
-        PostSucess msg ->
-            ( { model | msg = msg }, Cmd.none )
-        PostFail err ->
+        Auth (Result.Ok token) ->
+            { model | token = Just token, msg = "" } ! []
+        Auth (Result.Err err) ->
+            { model | msg = toString err } ! []
+        GetResult (Result.Ok msg) ->
+            { model | msg = msg } ! []
+        GetResult (Result.Err err) ->
             case err of
-                TokenExpired ->
-                    ( { model | msg = "Your token has expired" }, Cmd.none )
+                Jwt.TokenExpired ->
+                    { model | msg = "Token expired" } ! []
                 _ ->
-                    ( { model | msg = toString err }, Cmd.none )
+                    { model | msg = toString err } ! []
+        InvalidTokenResult (Result.Ok msg) ->
+            { model | msg = msg } ! []
+        InvalidTokenResult (Result.Err err) ->
+            { model | msg = toString err } ! []
+        -- _ ->
+        --     ( { model | msg = toString message }, Cmd.none )
+
 
 -- VIEW
 
@@ -99,8 +100,7 @@ view model =
                 [ onSubmit Submit
                 , class "col-xs-12"
                 ]
-                [ div
-                    [  ]
+                [ div []
                     [ div
                         [ class "form-group" ]
                         [ label
@@ -110,11 +110,8 @@ view model =
                             -- [ on "input" (Json.map (Input Uname) targetValue) (Signal.message address)
                             [ onInput (FormInput Uname)
                             , class "form-control"
-                            , id "uname"
-                            , type' "text"
                             , value model.uname
-                            ]
-                            [ ]
+                            ] []
                         ]
                     , div
                         [ class "form-group" ]
@@ -124,14 +121,11 @@ view model =
                         , input
                             [ onInput (FormInput Pword)
                             , class "form-control"
-                            , id "pword"
-                            , type' "password"
                             , value model.pword
-                            ]
-                            [ ]
+                            ] []
                         ]
                     , button
-                        [ type' "submit"
+                        [ type_ "submit"
                         , class "btn btn-default"
                         ]
                         [ text "Submit" ]
@@ -139,7 +133,8 @@ view model =
                 ]
             ]
         , case model.token of
-            Nothing -> text ""
+            Nothing ->
+                text ""
             Just tokenString ->
                 let token =
                     decodeToken tokenDecoder tokenString
@@ -147,14 +142,38 @@ view model =
                 div []
                     [ p [] [ text <| toString token ]
                     , button
-                        [ class "btn btn-warning"
+                        [ class "btn btn-primary"
                         , onClick TryToken
                         ]
                         [ text "Try token" ]
+                    , button
+                        [ class "btn btn-warning"
+                        , onClick TryWithInvalidToken
+                        ]
+                        [ text "Try bad token" ]
+                    , p [] [ text "Wait 30 seconds and try again too" ]
                     ]
         , p
             [ style [("color", "red")] ]
             [ text model.msg ]
         ]
 
--- CMDS
+-- COMMANDS
+
+submitCredentials : Model -> Cmd Msg
+submitCredentials model =
+    E.object
+        [ ("username", E.string model.uname)
+        , ("password", E.string model.pword)
+        ]
+    |> authenticate Auth authUrl tokenStringDecoder
+
+tryToken : String -> Cmd Msg
+tryToken token =
+    Jwt.get_ token "/api/data" dataDecoder
+    |> Task.perform GetResult
+
+tryWithInvalidToken : Cmd Msg
+tryWithInvalidToken =
+    Jwt.get_ "invalidToken" "/api/data" dataDecoder
+    |> Task.perform InvalidTokenResult
